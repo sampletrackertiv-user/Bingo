@@ -20,7 +20,12 @@ export default defineConfig(({ mode }) => {
           main: './index.html'
         },
         // Giữ lại external vì bạn đang dùng importmap trong index.html
-        external: ['@google/genai']
+        external: [
+          '@google/genai',
+          'firebase/app',
+          'firebase/database',
+          'firebase/analytics'
+        ]
       }
     },
     server: {

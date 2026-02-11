@@ -6,7 +6,7 @@ import { db } from './services/firebase';
 import { ref, set, onValue, update, push, child, get, remove } from 'firebase/database';
 import BingoCard from './components/BingoCard';
 import NumberDisplay from './components/NumberDisplay';
-import { Play, RotateCcw, Send, Settings, Trophy, Users, User, Mic, Copy, LogOut } from 'lucide-react';
+import { Play, RotateCcw, Send, Settings, Trophy, Users, User, Mic, Copy, LogOut, AlertCircle } from 'lucide-react';
 
 // --- Helper Functions ---
 
@@ -76,6 +76,7 @@ export default function App() {
   const [playerId, setPlayerId] = useState('');
   const [isHost, setIsHost] = useState(false);
   const [inputRoomId, setInputRoomId] = useState('');
+  const [dbError, setDbError] = useState<string | null>(null);
   
   // -- Synced Game State --
   const [config, setConfig] = useState<GameConfig>(DEFAULT_CONFIG);
@@ -98,9 +99,32 @@ export default function App() {
 
   // -- Firebase Effects --
 
+  // Check DB Connection on Mount
+  useEffect(() => {
+    if (!db) {
+      setDbError("Lỗi hệ thống: Không thể kết nối tới Firebase Database. Vui lòng kiểm tra console.");
+      return;
+    }
+    
+    // Test simple connection
+    const connectedRef = ref(db, ".info/connected");
+    const unsubscribe = onValue(connectedRef, (snap) => {
+      if (snap.val() === false) {
+        // Optional: Show offline status
+      } else {
+        setDbError(null);
+      }
+    }, (error) => {
+      console.error("DB Permission Error:", error);
+      // If we get permission denied on .info/connected, it's rare, but handles general read errors
+    });
+
+    return () => unsubscribe();
+  }, []);
+
   // Listen to Room Data
   useEffect(() => {
-    if (!roomId) return;
+    if (!roomId || !db) return;
 
     const roomRef = ref(db, `rooms/${roomId}`);
     
@@ -128,6 +152,11 @@ export default function App() {
         setRoomId('');
         alert("Phòng không tồn tại hoặc đã bị đóng.");
       }
+    }, (error) => {
+       console.error("Firebase Read Error:", error);
+       if (error.message.includes('permission_denied')) {
+          setDbError("Lỗi quyền truy cập (Permission Denied). Vui lòng kiểm tra Rules trên Firebase Console.");
+       }
     });
 
     return () => {
@@ -164,47 +193,11 @@ export default function App() {
   // -- Actions --
 
   const createRoom = async () => {
+    if (!db) return;
     if (!playerName.trim()) return;
     
-    const newRoomId = generateRoomId();
-    const newPlayerId = Date.now().toString();
-    const avatar = AVATARS[Math.floor(Math.random() * AVATARS.length)];
-    
-    const playerData: Player = {
-      id: newPlayerId,
-      name: playerName,
-      avatar,
-      score: 0,
-      isBot: false
-    };
-
-    const initialRoomData = {
-      status: GameStatus.LOBBY,
-      config: DEFAULT_CONFIG,
-      players: {
-        [newPlayerId]: playerData
-      },
-      hostId: newPlayerId,
-      createdAt: Date.now()
-    };
-
-    await set(ref(db, `rooms/${newRoomId}`), initialRoomData);
-
-    // Set Local State
-    setRoomId(newRoomId);
-    setPlayerId(newPlayerId);
-    setIsHost(true);
-    setTicket(createBingoCard()); // Host also gets a card
-  };
-
-  const joinRoom = async () => {
-    if (!playerName.trim() || !inputRoomId.trim()) return;
-    
-    const cleanRoomId = inputRoomId.trim().toUpperCase();
-    const roomRef = ref(db, `rooms/${cleanRoomId}`);
-    const snapshot = await get(roomRef);
-
-    if (snapshot.exists()) {
+    try {
+      const newRoomId = generateRoomId();
       const newPlayerId = Date.now().toString();
       const avatar = AVATARS[Math.floor(Math.random() * AVATARS.length)];
       
@@ -216,32 +209,84 @@ export default function App() {
         isBot: false
       };
 
-      await update(ref(db, `rooms/${cleanRoomId}/players`), {
-        [newPlayerId]: playerData
-      });
-      
-      // Send join message
-      const msgRef = push(child(ref(db), `rooms/${cleanRoomId}/chat`));
-      await set(msgRef, {
-        id: msgRef.key,
-        playerId: 'system',
-        playerName: 'System',
-        content: `${playerName} đã tham gia phòng!`,
-        timestamp: Date.now(),
-        type: 'system'
-      });
+      const initialRoomData = {
+        status: GameStatus.LOBBY,
+        config: DEFAULT_CONFIG,
+        players: {
+          [newPlayerId]: playerData
+        },
+        hostId: newPlayerId,
+        createdAt: Date.now()
+      };
 
-      setRoomId(cleanRoomId);
+      await set(ref(db, `rooms/${newRoomId}`), initialRoomData);
+
+      // Set Local State
+      setRoomId(newRoomId);
       setPlayerId(newPlayerId);
-      setIsHost(false);
-      setTicket(createBingoCard());
-    } else {
-      alert("Mã phòng không hợp lệ!");
+      setIsHost(true);
+      setTicket(createBingoCard()); // Host also gets a card
+    } catch (e) {
+      console.error(e);
+      alert("Lỗi khi tạo phòng. Vui lòng thử lại.");
+    }
+  };
+
+  const joinRoom = async () => {
+    if (!db) return;
+    if (!playerName.trim() || !inputRoomId.trim()) return;
+    
+    try {
+      const cleanRoomId = inputRoomId.trim().toUpperCase();
+      const roomRef = ref(db, `rooms/${cleanRoomId}`);
+      const snapshot = await get(roomRef);
+
+      if (snapshot.exists()) {
+        const newPlayerId = Date.now().toString();
+        const avatar = AVATARS[Math.floor(Math.random() * AVATARS.length)];
+        
+        const playerData: Player = {
+          id: newPlayerId,
+          name: playerName,
+          avatar,
+          score: 0,
+          isBot: false
+        };
+
+        await update(ref(db, `rooms/${cleanRoomId}/players`), {
+          [newPlayerId]: playerData
+        });
+        
+        // Send join message
+        const msgRef = push(child(ref(db), `rooms/${cleanRoomId}/chat`));
+        await set(msgRef, {
+          id: msgRef.key,
+          playerId: 'system',
+          playerName: 'System',
+          content: `${playerName} đã tham gia phòng!`,
+          timestamp: Date.now(),
+          type: 'system'
+        });
+
+        setRoomId(cleanRoomId);
+        setPlayerId(newPlayerId);
+        setIsHost(false);
+        setTicket(createBingoCard());
+      } else {
+        alert("Mã phòng không hợp lệ!");
+      }
+    } catch (e: any) {
+      console.error(e);
+      if (e.code === 'PERMISSION_DENIED') {
+        alert("Lỗi quyền truy cập. Vui lòng kiểm tra Rules trên Firebase Console.");
+      } else {
+        alert("Lỗi khi tham gia. Vui lòng thử lại.");
+      }
     }
   };
 
   const startGame = () => {
-    if (!isHost) return;
+    if (!isHost || !db) return;
     update(ref(db, `rooms/${roomId}`), {
       status: GameStatus.PLAYING,
       calledNumbers: [],
@@ -253,14 +298,8 @@ export default function App() {
   };
 
   const handleCallNextNumber = async () => {
+    if (!db) return;
     // Only host calls numbers
-    // Note: We need to calculate remaining numbers based on synced calledNumbers
-    // This function relies on the latest state from the closure or ref if calling rapidly, 
-    // but in an interval it usually picks up current state.
-    
-    // To be safe, we read the current called numbers from a ref-like logic or assume state is roughly up to date.
-    // Better way for Host: Calculate remaining from `calledNumbers` state.
-    
     const allNumbers = Array.from({length: 75}, (_, i) => i + 1);
     const available = allNumbers.filter(n => !calledNumbers.includes(n));
 
@@ -309,6 +348,7 @@ export default function App() {
   };
 
   const handleWin = () => {
+    if (!db) return;
     const myPlayer = players.find(p => p.id === playerId);
     if (!myPlayer) return;
 
@@ -322,7 +362,7 @@ export default function App() {
   };
 
   const sendChatMessage = (pid: string, content: string, type: 'chat' | 'system' | 'win' = 'chat') => {
-    if (!roomId) return;
+    if (!roomId || !db) return;
     const msgRef = push(child(ref(db), `rooms/${roomId}/chat`));
     const playerNameToSend = pid === 'system' ? 'BingoHub' : players.find(p => p.id === pid)?.name || 'Unknown';
     
@@ -343,7 +383,7 @@ export default function App() {
   };
 
   const updateConfig = (newConfig: Partial<GameConfig>) => {
-    if (!isHost) return;
+    if (!isHost || !db) return;
     update(ref(db, `rooms/${roomId}/config`), newConfig);
   };
 
@@ -362,6 +402,22 @@ export default function App() {
   };
 
   // --- Renders ---
+
+  // Global Error UI
+  if (dbError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#1a1a2e] p-4">
+        <div className="bg-red-900/20 border border-red-500/50 p-8 rounded-3xl shadow-2xl max-w-md text-center">
+           <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
+           <h2 className="text-2xl font-bold text-red-400 mb-2">Lỗi Kết Nối</h2>
+           <p className="text-gray-300">{dbError}</p>
+           <button onClick={() => window.location.reload()} className="mt-6 px-6 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white font-bold transition">
+             Tải lại trang
+           </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!roomId || status === GameStatus.LOBBY) {
     if (roomId) {
